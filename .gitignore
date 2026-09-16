@@ -1,0 +1,13 @@
+node_modules
+dist
+test-results
+.audit
+.codex
+design-qa.md
+playwright-report
+.DS_Store
+*.local
+*.backup
+*.bak
+.env*
+!.env.example
