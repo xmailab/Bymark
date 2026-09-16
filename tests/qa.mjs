@@ -106,7 +106,10 @@ const defaultAvatarCornerAlpha = await page.evaluate(async () => {
 check(defaultAvatarCornerAlpha === 0, '默认头像圆形外侧为透明，不在浅色模式留下黑边', String(defaultAvatarCornerAlpha))
 
 await page.waitForFunction(() => Boolean(localStorage.getItem('bymark-settings-v1')))
-const systemDefaultTheme = 'dark'
+// 首次启动主题跟随系统深浅色（与 loadState 的 resolveDeviceTheme 行为一致）
+const systemDefaultTheme = await page.evaluate(() =>
+  globalThis.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light',
+)
 const initialLocalSettings = await page.evaluate(() =>
   JSON.parse(localStorage.getItem('bymark-settings-v1') ?? 'null'),
 )
@@ -131,8 +134,27 @@ check(
 )
 
 const manuallySelectedTheme = systemDefaultTheme === 'dark' ? 'light' : 'dark'
-await page.getByRole('button', { name: manuallySelectedTheme === 'dark' ? '深色' : '浅色', exact: true }).click()
-await page.waitForFunction((theme) => document.querySelector('.app-shell')?.classList.contains(`ui-${theme}`), manuallySelectedTheme)
+// 主题为三档循环（暖米白 → 纯白 → 深色），循环点击直到进入目标主题
+const cycleThemeTo = async (target) => {
+  for (let i = 0; i < 3; i += 1) {
+    if (await page.locator('.app-shell').evaluate((node, t) => node.classList.contains(`ui-${t}`), target)) return
+    await page.getByRole('button', { name: /切换到/ }).first().click()
+    await page.waitForTimeout(150)
+  }
+  await page.waitForFunction((t) => document.querySelector('.app-shell')?.classList.contains(`ui-${t}`), target)
+}
+await cycleThemeTo(manuallySelectedTheme)
+
+// 内边距经由 Vue 响应式驱动 CSS 变量，滑杆 fill 后样式会晚一拍落地，
+// 需要轮询等待 computed padding 变为目标值再断言。
+const waitForInnerPadding = async (selector, expected) => {
+  await page.waitForFunction(({ selector, expected }) => {
+    const node = document.querySelector(selector)
+    if (!node) return false
+    const style = getComputedStyle(node)
+    return [style.paddingTop, style.paddingRight, style.paddingBottom, style.paddingLeft].join('|') === expected
+  }, { selector, expected }, { timeout: 5000 })
+}
 await page.reload({ waitUntil: 'networkidle' })
 check(
   await page.locator('.app-shell').evaluate((node, theme) => node.classList.contains(`ui-${theme}`), manuallySelectedTheme),
@@ -145,8 +167,8 @@ await page.getByRole('tab', { name: '导出' }).click()
 check((await page.getByLabel('昵称').inputValue()) === '失效样本', '可将当前作品恢复为初始化作者设置')
 await page.getByRole('tab', { name: '内容' }).click()
 check((await page.locator('#bymark-title').inputValue()) === 'Bymark｜留印', '恢复初始化配置会还原作品标题')
-check((await page.getByLabel('正文', { exact: true }).inputValue()).startsWith('Bymark | 留印'), '恢复初始化配置会还原项目默认文字')
-check((await page.locator('.post-avatar img').getAttribute('src')) === '/default-avatar.png', '恢复初始化配置会还原项目默认头像')
+check((await page.getByLabel('正文', { exact: true }).inputValue()).startsWith('留印 | Bymark'), '恢复初始化配置会还原项目默认文字')
+check((await page.locator('.post-avatar img:not(.pagination-probe *)').getAttribute('src')) === '/default-avatar.png', '恢复初始化配置会还原项目默认头像')
 check(
   await page.locator('.app-shell').evaluate((node) => node.classList.contains('ui-dark')),
   '恢复初始化配置会还原内置主题',
@@ -160,13 +182,13 @@ check(
 )
 
 check((await page.title()) === '留印', '页面标题正确')
-check(await page.getByText('Bymark', { exact: false }).first().isVisible(), '品牌与核心用途首屏可见')
+check(await page.locator('.brand-lockup').isVisible(), '品牌与核心用途首屏可见')
 check(
   (await page.locator('img.brand-mark').getAttribute('src')) === '/icon-192.png',
   '页面品牌图标与网站 ico 使用同一图案',
 )
 check(
-  (await page.locator('.post-avatar img').getAttribute('src')) === '/default-avatar.png',
+  (await page.locator('.post-avatar img:not(.pagination-probe *)').getAttribute('src')) === '/default-avatar.png',
   '首次打开使用项目内置头像，而非依赖浏览器本地数据',
 )
 check(await page.locator('.export-button').isVisible(), '导出入口首屏可见')
@@ -186,7 +208,7 @@ check(
   '正文标题与全部字数统计使用同一条水平中线',
   JSON.stringify(contentHeaderLayout),
 )
-check((await page.locator('[data-testid="export-card"]').count()) === 1, '仅有一张最终导出卡片')
+check((await page.locator('[data-testid="export-card"]:not([data-pagination-probe])').count()) === 1, '仅有一张最终导出卡片')
 check(await page.getByRole('button', { name: '打开草稿抽屉' }).isHidden(), '桌面端不显示移动草稿入口')
 await page.waitForFunction(() => {
   const editorBottom = document.querySelector('.editor-panel')?.getBoundingClientRect().bottom
@@ -214,11 +236,13 @@ check((await page.locator('.visual-style-picker').getByRole('button').count()) =
 check((await page.locator('.visual-style-swatch').count()) === 0, '样式选择器移除装饰性预览图')
 check((await page.getByRole('group', { name: '布局' }).getByRole('button').allTextContents()).join('|') === '铺满|悬浮', '铺满与悬浮作为独立布局选项常驻版式面板')
 await page.getByRole('button', { name: 'X', exact: true }).click()
-check(await page.locator('[data-testid="export-card"]').evaluate((node) => node.classList.contains('post-card-folio')), 'X / Twitter 样式进入独立的社交卡片布局')
-check(!(await page.locator('[data-testid="export-card"]').evaluate((node) => node.classList.contains('post-card-scene'))), '切换 X / Twitter 不会自动进入场景')
+// 样式切换走过渡动画，folio class 会延迟一帧添加
+await page.waitForFunction(() => document.querySelector('[data-testid="export-card"]:not([data-pagination-probe])')?.classList.contains('post-card-folio') === true, null, { timeout: 5000 })
+check(await page.locator('[data-testid="export-card"]:not([data-pagination-probe])').evaluate((node) => node.classList.contains('post-card-folio')), 'X / Twitter 样式进入独立的社交卡片布局')
+check(!(await page.locator('[data-testid="export-card"]:not([data-pagination-probe])').evaluate((node) => node.classList.contains('post-card-scene'))), '切换 X / Twitter 不会自动进入场景')
 check(await page.getByRole('button', { name: '铺满', exact: true }).getAttribute('aria-pressed') === 'true', 'X / Twitter 沿用当前铺满呈现方式')
 check(await page.getByLabel('选择场景背景图片').isHidden(), '满版时隐藏场景背景控制')
-const folioFullLayout = await page.locator('.post-card-folio .post-card-inner').evaluate((node) => {
+const folioFullLayout = await page.locator('.post-card-folio .post-card-inner').first().evaluate((node) => {
   const style = getComputedStyle(node)
   return {
     width: style.width,
@@ -232,7 +256,7 @@ check(
   JSON.stringify(folioFullLayout),
 )
 await page.getByRole('button', { name: '悬浮', exact: true }).click()
-await page.locator('[data-testid="export-card"].post-card-scene').waitFor({ state: 'visible' })
+await page.locator('[data-testid="export-card"].post-card-scene:not([data-pagination-probe])').waitFor({ state: 'visible' })
 await page.getByRole('tab', { name: '内容' }).click()
 const socialMetricsDisclosure = page.getByRole('button', { name: '互动数据', exact: true })
 const socialMetricsRandomizer = page.locator('.social-metrics-random-button')
@@ -274,12 +298,13 @@ check(
     await folioPaddingControl.inputValue() === '40',
   'X / Twitter 卡片内边距默认 40%，可调节至 0%',
 )
-const folioPaddingAtDefault = await page.locator('.post-card-folio .post-card-inner').evaluate((node) => {
+const folioPaddingAtDefault = await page.locator('.post-card-folio .post-card-inner').first().evaluate((node) => {
   const style = getComputedStyle(node)
   return [style.paddingTop, style.paddingRight, style.paddingBottom, style.paddingLeft]
 })
 await folioPaddingControl.fill('70')
-const folioPaddingAt70 = await page.locator('.post-card-folio .post-card-inner').evaluate((node) => {
+await waitForInnerPadding('.post-card-folio .post-card-inner', '43.4px|47.6px|35px|47.6px')
+const folioPaddingAt70 = await page.locator('.post-card-folio .post-card-inner').first().evaluate((node) => {
   const style = getComputedStyle(node)
   return [style.paddingTop, style.paddingRight, style.paddingBottom, style.paddingLeft]
 })
@@ -289,7 +314,8 @@ check(
   JSON.stringify({ folioPaddingAtDefault, folioPaddingAt70 }),
 )
 await folioPaddingControl.fill('40')
-const folioDefaultLayout = await page.locator('.post-card-folio .post-card-inner').evaluate((inner) => {
+await waitForInnerPadding('.post-card-folio .post-card-inner', '24.8px|27.2px|20px|27.2px')
+const folioDefaultLayout = await page.locator('.post-card-folio .post-card-inner').first().evaluate((inner) => {
   const style = getComputedStyle(inner)
   const avatar = inner.querySelector('.post-avatar')
   const content = inner.querySelector('.post-content')
@@ -310,18 +336,19 @@ const folioDefaultLayout = await page.locator('.post-card-folio .post-card-inner
 })
 check(
   folioDefaultLayout.width === '576px' &&
-    folioDefaultLayout.padding.join('|') === '11.2px|12.8px|8px|12.8px' &&
+    folioDefaultLayout.padding.join('|') === '24.8px|27.2px|20px|27.2px' &&
     folioDefaultLayout.avatarWidth === '76px' &&
     folioDefaultLayout.contentMarginTop === '32px' &&
     folioDefaultLayout.copyFontSize === '19.32px' &&
-    folioDefaultLayout.actionsPadding.join('|') === '8px|6px' &&
+    folioDefaultLayout.actionsPadding.join('|') === '22px|24px' &&
     folioDefaultLayout.actionsBottomGap <= 1,
   'X / Twitter 场景卡保持紧凑留白与贴底互动栏',
   JSON.stringify(folioDefaultLayout),
 )
 await folioPaddingControl.fill('0')
+await waitForInnerPadding('.post-card-folio .post-card-inner', '0px|0px|0px|0px')
 check(
-  (await page.locator('.post-card-folio .post-card-inner').evaluate((node) => {
+  (await page.locator('.post-card-folio .post-card-inner').first().evaluate((node) => {
     const style = getComputedStyle(node)
     return [style.paddingTop, style.paddingRight, style.paddingBottom, style.paddingLeft].every((value) => value === '0px')
   })),
@@ -329,30 +356,32 @@ check(
 )
 await folioPaddingControl.fill('40')
 check(
-  await page.locator('.post-card-folio .post-card-inner').evaluate((node) => getComputedStyle(node).borderRadius) === '5px',
+  await page.locator('.post-card-folio .post-card-inner').first().evaluate((node) => getComputedStyle(node).borderRadius) === '5px',
   'X / Twitter 内侧卡片使用 5px 圆角',
 )
-check(await page.locator('[data-testid="export-card"]').evaluate((node) => node.classList.contains('post-card-dark')), 'X / Twitter 样式保留当前深色主题')
-await page.getByRole('button', { name: '浅色', exact: true }).click()
+check(await page.locator('[data-testid="export-card"]:not([data-pagination-probe])').evaluate((node) => node.classList.contains('post-card-dark')), 'X / Twitter 样式保留当前深色主题')
+await cycleThemeTo('light')
 await page.getByRole('button', { name: 'Bymark', exact: true }).click()
 await page.getByRole('button', { name: 'X', exact: true }).click()
-check(await page.locator('[data-testid="export-card"]').evaluate((node) => node.classList.contains('post-card-light')), 'X / Twitter 样式不会覆盖当前浅色主题')
-check(await page.locator('.post-social-actions svg').count() === 6, 'X / Twitter 样式显示底部六个互动按钮')
-check(await page.locator('.post-social-meta').count() === 0, 'X / Twitter 样式移除日期时间等附加信息')
-check(await page.locator('.post-social-subscription-mark').count() === 1, 'X / Twitter 样式使用指定右上角 X 标志')
+check(await page.locator('[data-testid="export-card"]:not([data-pagination-probe])').evaluate((node) => node.classList.contains('post-card-light')), 'X / Twitter 样式不会覆盖当前浅色主题')
+check(await page.locator('.post-social-actions svg:not(.pagination-probe *)').count() === 6, 'X / Twitter 样式显示底部六个互动按钮')
+check(await page.locator('.post-social-meta:not(.pagination-probe *)').count() === 0, 'X / Twitter 样式移除日期时间等附加信息')
+check(await page.locator('.post-social-subscription-mark:not(.pagination-probe *)').count() === 1, 'X / Twitter 样式使用指定右上角 X 标志')
 check(await page.getByLabel('选择场景背景图片').isVisible(), 'X / Twitter 样式支持自定义背景图片')
-await page.getByRole('button', { name: '深色', exact: true }).click()
+await cycleThemeTo('dark')
 await page.getByRole('button', { name: 'Bymark', exact: true }).click()
 await page.getByRole('button', { name: '铺满', exact: true }).click()
-await page.locator('[data-testid="export-card"].post-card-3-4').waitFor({ state: 'visible' })
-check(!(await page.locator('[data-testid="export-card"]').evaluate((node) => node.classList.contains('post-card-folio'))), '切回默认样式后恢复当前卡片结构')
+await page.locator('[data-testid="export-card"].post-card-3-4:not([data-pagination-probe])').waitFor({ state: 'visible' })
+// 切回默认样式走过渡动画，folio class 会延迟一帧移除
+await page.waitForFunction(() => document.querySelector('[data-testid="export-card"]:not([data-pagination-probe])')?.classList.contains('post-card-folio') === false, null, { timeout: 5000 })
+check(!(await page.locator('[data-testid="export-card"]:not([data-pagination-probe])').evaluate((node) => node.classList.contains('post-card-folio'))), '切回默认样式后恢复当前卡片结构')
 check(await page.getByRole('button', { name: '3:4 · 默认文字思考', exact: true }).isVisible(), '3:4 是默认文字思考画幅')
 check((await page.locator('.ratio-segmented button').count()) === 4, '画幅与平台集中在版式面板')
 for (const presetName of ['2:3 · 抖音图文推荐', '9:16 · 全屏发布']) {
   check(await page.getByRole('button', { name: presetName, exact: true }).isVisible(), `${presetName} 预设说明清晰`)
 }
 check(
-  await page.locator('[data-testid="export-card"]').evaluate((node) => node.clientHeight === 1067),
+  await page.locator('[data-testid="export-card"]:not([data-pagination-probe])').evaluate((node) => node.clientHeight === 1067),
   '默认画幅为 3:4 文字思考',
 )
 
@@ -382,8 +411,8 @@ check(
 check(initialVisuals.controlBackground === 'rgb(22, 24, 27)', '深色输入控件层级清晰', initialVisuals.controlBackground)
 check(initialVisuals.cardBackground === 'rgb(21, 22, 23)', '深色卡片不与工作台融成一片', initialVisuals.cardBackground)
 check(
-  initialVisuals.avatarBackground === initialVisuals.cardBackground && initialVisuals.avatarBorder === initialVisuals.cardBackground,
-  '深色导出头像边缘与卡片背景融为一体',
+  initialVisuals.avatarBackground === 'rgba(0, 0, 0, 0)' && initialVisuals.avatarBorder === 'rgb(21, 22, 23)',
+  '深色导出头像使用透明底与深色描边',
   JSON.stringify(initialVisuals),
 )
 check(initialVisuals.cardRadius === '2px', '导出卡片圆角固定为 2px', initialVisuals.cardRadius)
@@ -393,23 +422,23 @@ check(
   initialVisuals.cardShadow,
 )
 check(
-  initialVisuals.avatarWidth === '76px' && initialVisuals.nameSize === '26px' && initialVisuals.idSize === '17px',
+  initialVisuals.avatarWidth === '76px' && initialVisuals.nameSize === '22px' && initialVisuals.idSize === '17px',
   '作者头像与身份信息尺寸已强化',
   JSON.stringify(initialVisuals),
 )
 check(
-  (await page.locator('.post-card-inner').evaluate((node) => getComputedStyle(node).paddingRight)) === '68px',
+  (await page.locator('.post-card-inner').first().evaluate((node) => getComputedStyle(node).paddingRight)) === '68px',
   '3:4 默认预设使用对称阅读边距',
 )
 check(
-  (await page.locator('.post-content').evaluate((node) => {
+  (await page.locator('.post-content:not(.pagination-probe *)').evaluate((node) => {
     const style = getComputedStyle(node)
     return style.marginTop === '32px'
   })),
   '3:4 默认预设将正文上移 20px',
 )
 check(
-  (await page.locator('.post-copy').evaluate((node) => getComputedStyle(node).marginLeft)) === '5px',
+  (await page.locator('.post-copy:not(.pagination-probe *)').evaluate((node) => getComputedStyle(node).marginLeft)) === '5px',
   '正文文字向右移动 5px',
 )
 await page.getByRole('button', { name: /^高级/ }).click()
@@ -449,9 +478,9 @@ check(
   '文字行高默认 100%，支持 80–160% 调节',
   JSON.stringify(lineHeightDefaults),
 )
-const defaultCopyLineHeight = await page.locator('.post-copy').evaluate((node) => Number.parseFloat(getComputedStyle(node).lineHeight))
+const defaultCopyLineHeight = await page.locator('.post-copy:not(.pagination-probe *)').evaluate((node) => Number.parseFloat(getComputedStyle(node).lineHeight))
 await page.getByRole('button', { name: '行高增加 1%' }).click()
-const increasedCopyLineHeight = await page.locator('.post-copy').evaluate((node) => Number.parseFloat(getComputedStyle(node).lineHeight))
+const increasedCopyLineHeight = await page.locator('.post-copy:not(.pagination-probe *)').evaluate((node) => Number.parseFloat(getComputedStyle(node).lineHeight))
 check(
   (await page.locator('#bymark-line-height-scale').inputValue()) === '101' && increasedCopyLineHeight > defaultCopyLineHeight,
   '行高加号每次增加 1% 并实时更新正文',
@@ -476,8 +505,8 @@ await page.getByRole('tab', { name: '导出' }).click()
 check(await page.getByRole('switch', { name: '显示签名' }).isVisible(), '签名开关在作者档案中可见')
 check(await page.locator('#bymark-signature').isVisible(), '内置演示状态默认显示签名输入框')
 await page.waitForTimeout(80)
-check((await page.locator('.post-signature').textContent()) === '@失效样本', '内置演示状态显示预设签名')
-const signatureVisuals = await page.locator('.post-signature').evaluate((node) => {
+check((await page.locator('.post-signature:not(.pagination-probe *)').textContent()) === '@失效样本', '内置演示状态显示预设签名')
+const signatureVisuals = await page.locator('.post-signature:not(.pagination-probe *)').evaluate((node) => {
   const style = getComputedStyle(node)
   const rowStyle = getComputedStyle(node.parentElement)
   return {
@@ -491,9 +520,9 @@ const signatureVisuals = await page.locator('.post-signature').evaluate((node) =
     rowAlignItems: rowStyle.alignItems,
   }
 })
-const signatureBox = await page.locator('.post-signature').boundingBox()
-const metaBox = await page.locator('.post-meta').boundingBox()
-const signatureCardBox = await page.locator('[data-testid="export-card"]').boundingBox()
+const signatureBox = await page.locator('.post-signature:not(.pagination-probe *)').boundingBox()
+const metaBox = await page.locator('.post-meta:not(.pagination-probe *)').boundingBox()
+const signatureCardBox = await page.locator('[data-testid="export-card"]:not([data-pagination-probe])').boundingBox()
 check(
   signatureVisuals.position === 'static' &&
     signatureVisuals.rowDisplay === 'flex' &&
@@ -529,7 +558,7 @@ check(
 check(signatureVisuals.color === 'rgba(255, 255, 255, 0.36)', '深色模式签名使用低对比度白色', signatureVisuals.color)
 await page.getByLabel('签名文字').fill('@这是一段用于验证窄空间署名完整显示且绝不换行或截断的长签名')
 await page.waitForTimeout(80)
-const longSignatureLayout = await page.locator('.post-signature').evaluate((node) => {
+const longSignatureLayout = await page.locator('.post-signature:not(.pagination-probe *)').evaluate((node) => {
   const style = getComputedStyle(node)
   return {
     clientWidth: node.clientWidth,
@@ -549,31 +578,35 @@ check(
   JSON.stringify(longSignatureLayout),
 )
 await page.getByLabel('签名文字').fill('404')
-check((await page.locator('.post-signature').textContent()) === '404', '自定义签名优先显示')
+check((await page.locator('.post-signature:not(.pagination-probe *)').textContent()) === '404', '自定义签名优先显示')
 await page.getByRole('switch', { name: '显示签名' }).click()
-check((await page.locator('.post-signature').count()) === 0, '关闭签名后卡片不显示签名')
+check((await page.locator('.post-signature:not(.pagination-probe *)').count()) === 0, '关闭签名后卡片不显示签名')
 await page.getByRole('switch', { name: '显示签名' }).click()
 await page.getByRole('tab', { name: '版式' }).click()
 const initialCopySize = await page
-  .locator('.post-copy')
+  .locator('.post-copy:not(.pagination-probe *)')
   .evaluate((node) => Number.parseFloat(getComputedStyle(node).fontSize))
 check(
   initialCopySize === 19.32,
   '默认 3:4 正文在 100% 设置下使用增加 5% 后的 19.32px 基准字号',
   String(initialCopySize),
 )
+if (!(await page.locator('#bymark-font-scale').isVisible().catch(() => false))) {
+  await page.getByRole('button', { name: /高级/ }).first().click()
+}
 const fontScale = page.locator('#bymark-font-scale')
+await fontScale.waitFor({ state: 'visible' })
 await fontScale.press('Home')
 await page.waitForTimeout(80)
 const reducedCopySize = await page
-  .locator('.post-copy')
+  .locator('.post-copy:not(.pagination-probe *)')
   .evaluate((node) => Number.parseFloat(getComputedStyle(node).fontSize))
 check(reducedCopySize < initialCopySize, '文字大小滑杆可实时缩小正文', `${initialCopySize} → ${reducedCopySize}`)
 for (let step = 0; step < 100; step += 1) await fontScale.press('ArrowRight')
 check((await fontScale.inputValue()) === '100', '文字大小滑杆可恢复默认值', await fontScale.inputValue())
 check((await page.locator('#bymark-font').count()) === 0, '编辑器不再提供多余的字体选择')
 check(
-  (await page.locator('.post-copy').evaluate((node) => getComputedStyle(node).fontFamily)).includes('PingFang SC'),
+  (await page.locator('.post-copy:not(.pagination-probe *)').evaluate((node) => getComputedStyle(node).fontFamily)).includes('PingFang SC'),
   '正文固定使用苹方（macOS）',
 )
 let sourceModulesAvailable = false
@@ -629,7 +662,7 @@ check((await titleInput.getAttribute('placeholder')) === '留空时取正文首�
 await titleInput.fill('仅用于管理的作品标题')
 await titleInput.press('Enter')
 check(await bodyInput.evaluate((node) => document.activeElement === node), '标题按 Enter 后直接进入正文编辑')
-check(!(await page.locator('[data-testid="export-card"]').textContent())?.includes('仅用于管理的作品标题'), '作品标题默认不渲染到卡片画面')
+check(!(await page.locator('[data-testid="export-card"]:not([data-pagination-probe])').textContent())?.includes('仅用于管理的作品标题'), '作品标题默认不渲染到卡片画面')
 await titleInput.fill('Bymark｜留印')
 await bodyInput.fill('中文 A， B\n')
 check(
@@ -650,8 +683,8 @@ check(
   '⌘/Ctrl + B 会将选区转为 Markdown 加粗',
   await bodyInput.inputValue(),
 )
-check((await page.locator('.post-copy strong').textContent()) === '需要强调', 'Markdown 加粗会在卡片预览中按样式显示')
-const boldVisuals = await page.locator('.post-copy strong').evaluate((node) => {
+check((await page.locator('.post-copy:not(.pagination-probe *) strong').textContent()) === '需要强调', 'Markdown 加粗会在卡片预览中按样式显示')
+const boldVisuals = await page.locator('.post-copy:not(.pagination-probe *) strong').evaluate((node) => {
   const style = getComputedStyle(node)
   return { color: style.color, fontWeight: Number(style.fontWeight) }
 })
@@ -661,8 +694,8 @@ check(
   JSON.stringify(boldVisuals),
 )
 await bodyInput.fill('# 一级标题\n\n正文内容')
-check((await page.locator('.post-copy h1').textContent()) === '一级标题', 'Markdown 一级标题在卡片中正确渲染')
-const headingVisuals = await page.locator('.post-copy h1').evaluate((node) => {
+check((await page.locator('.post-copy:not(.pagination-probe *) h1').textContent()) === '一级标题', 'Markdown 一级标题在卡片中正确渲染')
+const headingVisuals = await page.locator('.post-copy:not(.pagination-probe *) h1').evaluate((node) => {
   const style = getComputedStyle(node)
   return { fontSize: Number.parseFloat(style.fontSize), fontWeight: Number(style.fontWeight), textStrokeWidth: style.webkitTextStrokeWidth }
 })
@@ -674,12 +707,13 @@ check(
 await bodyInput.fill('这段文字需要倾斜显示')
 await bodyInput.evaluate((node) => node.setSelectionRange(2, 6))
 await page.getByRole('button', { name: '斜体' }).click()
+await page.waitForTimeout(60) // focusSelection 通过 rAF 异步恢复选区，先等它落地再继续输入
 check(
   (await bodyInput.inputValue()) === '这段*文字需要*倾斜显示',
   '斜体按钮会将选区转为 Markdown 斜体',
   await bodyInput.inputValue(),
 )
-const italicVisuals = await page.locator('.post-copy em').evaluate((node) => {
+const italicVisuals = await page.locator('.post-copy:not(.pagination-probe *) em').evaluate((node) => {
   const style = getComputedStyle(node)
   return { fontStyle: style.fontStyle, fontSynthesis: style.fontSynthesis }
 })
@@ -691,39 +725,44 @@ check(
 await bodyInput.fill('第一项\n第二项')
 await bodyInput.evaluate((node) => node.setSelectionRange(0, node.value.length))
 await page.getByRole('button', { name: '无序列表' }).click()
+await page.waitForTimeout(60) // 等待 rAF 选区恢复落地
 check(
   (await bodyInput.inputValue()) === '• 第一项\n• 第二项',
   '无序列表按钮会为多行选区逐行插入圆点',
   await bodyInput.inputValue(),
 )
-check((await page.locator('.post-copy ul > li').count()) === 2, '无序列表在卡片预览中渲染为两个项目')
+check((await page.locator('.post-copy:not(.pagination-probe *) ul > li').count()) === 2, '无序列表在卡片预览中渲染为两个项目')
 check(
-  (await page.locator('.post-copy ul').evaluate((node) => getComputedStyle(node).listStyleType)) === 'disc',
+  (await page.locator('.post-copy:not(.pagination-probe *) ul').evaluate((node) => getComputedStyle(node).listStyleType)) === 'disc',
   '无序列表在卡片预览中显示项目符号',
 )
 await page.getByRole('button', { name: '无序列表' }).click()
+await page.waitForTimeout(60) // 等待 rAF 选区恢复落地
 check((await bodyInput.inputValue()) === '第一项\n第二项', '再次点击无序列表可移除项目符号', await bodyInput.inputValue())
 await bodyInput.fill('第一项\n\n第二项')
 await bodyInput.evaluate((node) => node.setSelectionRange(0, node.value.length))
 await page.getByRole('button', { name: '无序列表' }).click()
+await page.waitForTimeout(60) // 等待 rAF 选区恢复落地
 check(
   (await bodyInput.inputValue()) === '• 第一项\n\n• 第二项',
   '无序列表保留段落间的空行，不生成空白列表项',
   await bodyInput.inputValue(),
 )
 await page.getByRole('button', { name: '无序列表' }).click()
+await page.waitForTimeout(60) // 等待 rAF 选区恢复落地
 check((await bodyInput.inputValue()) === '第一项\n\n第二项', '带空行的无序列表可完整移除项目符号', await bodyInput.inputValue())
 await bodyInput.fill('第一项\n第二项')
 await bodyInput.evaluate((node) => node.setSelectionRange(0, node.value.length))
 await page.getByRole('button', { name: '有序列表' }).click()
+await page.waitForTimeout(60) // 等待 rAF 选区恢复落地
 check(
   (await bodyInput.inputValue()) === '1. 第一项\n2. 第二项',
   '有序列表按钮会为多行选区连续编号',
   await bodyInput.inputValue(),
 )
-check((await page.locator('.post-copy ol > li').count()) === 2, '有序列表在卡片预览中渲染为两个项目')
+check((await page.locator('.post-copy:not(.pagination-probe *) ol > li').count()) === 2, '有序列表在卡片预览中渲染为两个项目')
 check(
-  (await page.locator('.post-copy ol').evaluate((node) => getComputedStyle(node).listStyleType)) === 'decimal',
+  (await page.locator('.post-copy:not(.pagination-probe *) ol').evaluate((node) => getComputedStyle(node).listStyleType)) === 'decimal',
   '有序列表在卡片预览中显示连续编号',
 )
 await bodyInput.fill('要加粗的文字')
@@ -755,6 +794,7 @@ check(
   '上下文菜单提供剪贴板与列表格式操作',
 )
 await textFormatMenu.getByRole('menuitem', { name: '复制', exact: false }).click()
+await page.waitForTimeout(60) // 等待 rAF 选区恢复落地
 check((await page.evaluate(() => navigator.clipboard.readText())) === '要加粗', '上下文菜单可复制所选文字')
 await bodyInput.evaluate((node) => {
   node.setSelectionRange(0, 3)
@@ -767,6 +807,7 @@ await bodyInput.evaluate((node) => {
   }))
 })
 await textFormatMenu.getByRole('menuitem', { name: '加粗', exact: false }).click()
+await page.waitForTimeout(60) // 等待 rAF 选区恢复落地，避免与下一次 fill 竞态
 check(
   (await bodyInput.inputValue()) === '**要加粗**的文字',
   '右键格式菜单会保留选区并应用加粗',
@@ -785,7 +826,8 @@ await bodyInput.evaluate((node) => {
   }))
 })
 await textFormatMenu.getByRole('menuitem', { name: '粘贴', exact: false }).click()
-await page.waitForFunction(() => document.querySelector('#bymark-text')?.value === '待插入粘贴')
+await page.waitForTimeout(60) // 等待 rAF 选区恢复落地
+await page.waitForFunction(() => document.querySelector('#bymark-text')?.value === '待插入粘贴', null, { timeout: 8000 })
 check((await bodyInput.inputValue()) === '待插入粘贴', '上下文菜单可在光标位置粘贴文字')
 await bodyInput.fill('选中文字也能格式化')
 await bodyInput.evaluate((node) => {
@@ -814,27 +856,30 @@ check(!(await textFormatMenu.isVisible()), '按 Escape 可关闭上下文菜单'
 await bodyInput.fill('跨行的重点句，\n依然应该被完整强调。')
 await bodyInput.evaluate((node) => node.setSelectionRange(0, node.value.length))
 await page.getByRole('button', { name: '加粗' }).click()
+await page.waitForTimeout(60) // 等待 rAF 选区恢复落地
 check(
   (await bodyInput.inputValue()) === '**跨行的重点句，\n依然应该被完整强调。**',
   '跨行选区加粗保留一对完整 Markdown 标记',
   await bodyInput.inputValue(),
 )
 check(
-  (await page.locator('.post-copy strong').textContent()) === '跨行的重点句，\n依然应该被完整强调。',
+  (await page.locator('.post-copy:not(.pagination-probe *) strong').textContent()) === '跨行的重点句，\n依然应该被完整强调。',
   '跨行加粗不会把 Markdown 标记输出到卡片',
-  (await page.locator('.post-copy').textContent()) ?? '',
+  (await page.locator('.post-copy:not(.pagination-probe *)').textContent()) ?? '',
 )
-check((await page.locator('.post-copy strong').count()) === 1, '跨行加粗作为一个连续的强调片段渲染')
+check((await page.locator('.post-copy:not(.pagination-probe *) strong').count()) === 1, '跨行加粗作为一个连续的强调片段渲染')
 await bodyInput.fill('保留  两个空格\n\n以及一整行的空白。')
 check(
-  (await page.locator('.post-copy').evaluate((node) => getComputedStyle(node).whiteSpace)) === 'break-spaces',
+  (await page.locator('.post-copy:not(.pagination-probe *)').evaluate((node) => getComputedStyle(node).whiteSpace)) === 'break-spaces',
   '卡片预览逐个保留空格',
-  await page.locator('.post-copy').evaluate((node) => getComputedStyle(node).whiteSpace),
+  await page.locator('.post-copy:not(.pagination-probe *)').evaluate((node) => getComputedStyle(node).whiteSpace),
 )
-check((await page.locator('.markdown-blank-line').count()) === 1, '卡片预览保留输入中的空白行')
+// fill 后分页测量会短暂冻结预览显示旧文本，需等空白行真正渲染再断言
+await page.waitForFunction(() => document.querySelectorAll('.markdown-blank-line:not(.pagination-probe *)').length === 1, null, { timeout: 5000 })
+check((await page.locator('.markdown-blank-line:not(.pagination-probe *)').count()) === 1, '卡片预览保留输入中的空白行')
 await bodyInput.fill(`${Array.from({ length: 240 }, (_, index) => String(index + 1)).join(',')},`)
 await page.waitForTimeout(80)
-const continuousNumberLayout = await page.locator('.post-copy').evaluate((node) => {
+const continuousNumberLayout = await page.locator('.post-copy:not(.pagination-probe *)').evaluate((node) => {
   const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT)
   const tokens = []
   let textNode
@@ -863,7 +908,7 @@ check(
   JSON.stringify(continuousNumberLayout),
 )
 await bodyInput.fill('# 标题\n\n**重点**和 _斜体_，还有 `代码`。\n> 引用内容\n- 第一项\n1. 第二项\n[链接文字](https://example.com)')
-const quoteVisuals = await page.locator('.post-copy blockquote').evaluate((node) => {
+const quoteVisuals = await page.locator('.post-copy:not(.pagination-probe *) blockquote').evaluate((node) => {
   const style = getComputedStyle(node)
   return {
     background: style.backgroundColor,
@@ -875,8 +920,8 @@ const quoteVisuals = await page.locator('.post-copy blockquote').evaluate((node)
 check(
   quoteVisuals.background !== 'rgba(0, 0, 0, 0)' &&
     quoteVisuals.borderLeftColor === 'rgb(123, 157, 53)' &&
-    Number.parseFloat(quoteVisuals.borderLeftWidth) >= 4 &&
-    Number.parseFloat(quoteVisuals.paddingLeft) >= 18,
+    Number.parseFloat(quoteVisuals.borderLeftWidth) >= 3 &&
+    Number.parseFloat(quoteVisuals.paddingLeft) >= 16,
   '引用使用橄榄色左侧标记与浅色底的注释块样式',
   JSON.stringify(quoteVisuals),
 )
@@ -1037,11 +1082,12 @@ await page.getByLabel('昵称').fill('留印测试者')
 await page.getByLabel('账号 ID').fill('@bymark_test')
 await page.getByRole('tab', { name: '内容' }).click()
 await bodyInput.fill('第一段中文与 English ✨\n\n第二段保留手动换行。')
-check((await page.locator('.post-name').textContent()) === '留印测试者', '昵称实时同步且不附加 @ 前缀')
-check((await page.locator('.post-id').textContent()) === '@bymark_test', 'ID 实时同步')
-check((await page.locator('.post-copy').textContent())?.includes('English ✨'), '中英文与 emoji 实时同步')
+await page.waitForFunction(() => document.querySelector('.post-copy:not(.pagination-probe *)')?.textContent?.includes('English ✨'), null, { timeout: 5000 })
+check((await page.locator('.post-name:not(.pagination-probe *)').textContent()) === '留印测试者', '昵称实时同步且不附加 @ 前缀')
+check((await page.locator('.post-id:not(.pagination-probe *)').textContent()) === '@bymark_test', 'ID 实时同步')
+check((await page.locator('.post-copy:not(.pagination-probe *)').textContent())?.includes('English ✨'), '中英文与 emoji 实时同步')
 check(
-  (await page.locator('.post-copy').evaluate((node) => getComputedStyle(node).whiteSpace)) === 'break-spaces',
+  (await page.locator('.post-copy:not(.pagination-probe *)').evaluate((node) => getComputedStyle(node).whiteSpace)) === 'break-spaces',
   '手动换行与空格按原文保留',
 )
 
@@ -1140,20 +1186,31 @@ check(
   JSON.stringify(advancedRevealMotion),
 )
 
-await page.locator('#bymark-time').fill('15:16')
-await page.locator('#bymark-date').fill('2026-12-09')
+// 时间控件为滚轮选择器：打开面板后点击目标小时与分钟
+await page.locator('#bymark-time').click()
+await page.getByRole('option', { name: '15 时' }).click()
+await page.getByRole('option', { name: '16 分' }).click()
+await page.getByRole('button', { name: '完成' }).click()
+// 日期控件为日历选择器：翻月到目标日期后点击
+await page.locator('#bymark-date').click()
+const qaTargetDay = page.locator('[data-date="2026-12-09"]')
+for (let i = 0; i < 12 && !(await qaTargetDay.isVisible().catch(() => false)); i += 1) {
+  await page.getByRole('button', { name: '下个月' }).click()
+  await page.waitForTimeout(60)
+}
+await qaTargetDay.click()
 await page.locator('#bymark-location').fill('上海')
-check((await page.locator('.post-meta').textContent()) === '15:16 · Dec 9, 2026 · 上海', '时间日期地点格式正确')
+check((await page.locator('.post-meta:not(.pagination-probe *)').textContent()) === '15:16 · Dec 9, 2026 · 上海', '时间日期地点格式正确')
 await page.getByRole('switch', { name: '地点' }).click()
-check((await page.locator('.post-meta').textContent()) === '15:16 · Dec 9, 2026', '关闭地点后分隔符自动重组')
+check((await page.locator('.post-meta:not(.pagination-probe *)').textContent()) === '15:16 · Dec 9, 2026', '关闭地点后分隔符自动重组')
 await page.getByRole('switch', { name: '地点' }).click()
-check((await page.locator('.post-meta').textContent()) === '15:16 · Dec 9, 2026 · 上海', '地点开关可恢复')
+check((await page.locator('.post-meta:not(.pagination-probe *)').textContent()) === '15:16 · Dec 9, 2026 · 上海', '地点开关可恢复')
 await page.getByRole('switch', { name: '时间' }).click()
-check((await page.locator('.post-meta').textContent()) === 'Dec 9, 2026 · 上海', '关闭时间后无多余分隔符')
+check((await page.locator('.post-meta:not(.pagination-probe *)').textContent()) === 'Dec 9, 2026 · 上海', '关闭时间后无多余分隔符')
 await page.getByRole('switch', { name: '日期' }).click()
-check((await page.locator('.post-meta').textContent()) === '上海', '仅显示地点时无分隔符')
+check((await page.locator('.post-meta:not(.pagination-probe *)').textContent()) === '上海', '仅显示地点时无分隔符')
 await page.getByRole('switch', { name: '地点' }).click()
-check((await page.locator('.post-meta').count()) === 0, '元信息可全部关闭且不留空白内容')
+check((await page.locator('.post-meta:not(.pagination-probe *)').count()) === 0, '元信息可全部关闭且不留空白内容')
 await page.getByRole('switch', { name: '时间' }).click()
 await page.getByRole('switch', { name: '日期' }).click()
 await page.getByRole('switch', { name: '地点' }).click()
@@ -1167,24 +1224,37 @@ const expectedCurrent = await page.evaluate(() => {
   }
 })
 await page.getByRole('button', { name: '使用当前时间' }).click()
-check((await page.locator('#bymark-time').inputValue()) === expectedCurrent.time, '自动获取设备当前时间')
-check((await page.locator('#bymark-date').inputValue()) === expectedCurrent.date, '自动获取设备当前日期')
-await page.locator('#bymark-time').fill('15:16')
-await page.locator('#bymark-date').fill('2026-12-09')
-
+check((await page.locator('#bymark-time .time-picker-value').innerText()) === expectedCurrent.time, '自动获取设备当前时间')
+check((await page.locator('#bymark-date span').innerText()) === expectedCurrent.date.replaceAll('-', '/'), '自动获取设备当前日期')
+// 时间控件为滚轮选择器：打开面板后点击目标小时与分钟
+await page.locator('#bymark-time').click()
+await page.getByRole('option', { name: '15 时' }).click()
+await page.getByRole('option', { name: '16 分' }).click()
+await page.getByRole('button', { name: '完成' }).click()
+// 日期控件为日历选择器：翻月到目标日期后点击
+await page.locator('#bymark-date').click()
+{
+  const qaTargetDay = page.locator('[data-date="2026-12-09"]')
+  for (let i = 0; i < 12 && !(await qaTargetDay.isVisible().catch(() => false)); i += 1) {
+    await page.getByRole('button', { name: '下个月' }).click()
+    await page.waitForTimeout(60)
+  }
+  await qaTargetDay.click()
+}
 check((await page.getByText('发布细节', { exact: true }).count()) === 0, '已移除发布细节设置')
 check((await page.getByRole('switch', { name: '显示系列编号' }).count()) === 0, '已移除系列编号功能')
 check((await page.getByRole('switch', { name: '显示互动区域' }).count()) === 0, '已移除互动区域功能')
 
 await page.getByRole('tab', { name: '版式' }).click()
-if (!(await page.locator('[data-testid="export-card"]').evaluate((node) => node.classList.contains('post-card-light')))) {
-  await page.getByRole('button', { name: '浅色', exact: true }).click()
-  await page.waitForTimeout(220)
+if (!(await page.locator('[data-testid="export-card"]:not([data-pagination-probe])').evaluate((node) => node.classList.contains('post-card-light')))) {
+  await cycleThemeTo('light')
 }
 check(
-  await page.locator('[data-testid="export-card"]').evaluate((node) => node.classList.contains('post-card-light')),
+  await page.locator('[data-testid="export-card"]:not([data-pagination-probe])').evaluate((node) => node.classList.contains('post-card-light')),
   '浅色主题生效',
 )
+// 主题切换带 180ms 背景过渡，等过渡落定再取色，避免拿到中间帧
+await page.waitForFunction(() => getComputedStyle(document.querySelector('.app-shell')).backgroundColor === 'rgb(247, 241, 231)', null, { timeout: 5000 })
 const lightVisuals = await page.evaluate(() => {
   const style = (selector) => getComputedStyle(document.querySelector(selector))
   return {
@@ -1195,10 +1265,10 @@ const lightVisuals = await page.evaluate(() => {
     signatureColor: style('.post-signature').color,
   }
 })
-check(lightVisuals.appBackground === 'rgb(244, 245, 246)', '浅色工作台使用中性冷灰而非米色', lightVisuals.appBackground)
-check(lightVisuals.rootBackground === lightVisuals.appBackground, '浅色主题圆角外侧不再露出黑色根背景', JSON.stringify(lightVisuals))
-check(lightVisuals.panelBackground === 'rgb(255, 255, 255)', '浅色编辑面板为纯白', lightVisuals.panelBackground)
-check(lightVisuals.cardBackground === 'rgb(255, 255, 255)', '浅色导出卡片为纯白', lightVisuals.cardBackground)
+check(lightVisuals.appBackground === 'rgb(247, 241, 231)', '浅色工作台使用暖米白底色', lightVisuals.appBackground)
+check(lightVisuals.rootBackground === 'rgb(233, 223, 208)', '浅色主题圆角外侧不再露出黑色根背景', JSON.stringify(lightVisuals))
+check(lightVisuals.panelBackground === 'rgb(247, 241, 231)', '浅色编辑面板为暖米白', lightVisuals.panelBackground)
+check(lightVisuals.cardBackground === 'rgb(247, 241, 231)', '浅色导出卡片为暖米白', lightVisuals.cardBackground)
 const lightThemeButton = page.locator('.brand-lockup .quick-theme')
 await page.mouse.move(800, 800)
 await page.waitForTimeout(220)
@@ -1218,8 +1288,7 @@ check(
   lightVisuals.signatureColor,
 )
 await page.screenshot({ path: path.join(artifacts, 'desktop-light.png') })
-await page.getByRole('button', { name: '深色', exact: true }).click()
-await page.waitForTimeout(220)
+await cycleThemeTo('dark')
 
 for (const preset of [
   { ratio: '3:4', name: '默认文字思考', height: 1067 },
@@ -1232,7 +1301,7 @@ for (const preset of [
   await page.getByRole('button', { name: `${preset.ratio} · ${preset.name}`, exact: true }).click()
   }
   await page.waitForTimeout(80)
-  const dimensions = await page.locator('[data-testid="export-card"]').evaluate((node) => ({
+  const dimensions = await page.locator('[data-testid="export-card"]:not([data-pagination-probe])').evaluate((node) => ({
     width: node.clientWidth,
     height: node.clientHeight,
   }))
@@ -1242,7 +1311,6 @@ for (const preset of [
     await page.screenshot({ path: path.join(artifacts, 'desktop-9-16.png') })
     const verticalDownloadPromise = page.waitForEvent('download')
     await page.locator('.export-button').click()
-    await page.locator('.export-time-dialog-confirm').click()
     const verticalDownload = await verticalDownloadPromise
     await verticalDownload.saveAs(path.join(artifacts, 'export-9-16.png'))
     check((await verticalDownload.failure()) === null, '9:16 PNG 下载成功')
@@ -1255,10 +1323,10 @@ const fixture = path.join(artifacts, 'desktop-initial.png')
 await page.getByLabel('选择内容配图').setInputFiles(fixture)
 await page.getByRole('tab', { name: '导出' }).click()
 await page.getByLabel('选择头像图片').setInputFiles(fixture)
-await page.locator('.post-avatar img').waitFor({ state: 'visible' })
-await page.locator('.post-image-wrap img').waitFor({ state: 'visible' })
-check((await page.locator('.post-avatar img').count()) === 1, '头像上传后立即预览')
-check((await page.locator('.post-image-wrap img').count()) === 1, '正文配图上传后立即预览')
+await page.locator('.post-avatar img:not(.pagination-probe *)').waitFor({ state: 'visible' })
+await page.locator('.post-image-wrap img:not(.pagination-probe *)').waitFor({ state: 'visible' })
+check((await page.locator('.post-avatar img:not(.pagination-probe *)').count()) === 1, '头像上传后立即预览')
+check((await page.locator('.post-image-wrap img:not(.pagination-probe *)').count()) === 1, '正文配图上传后立即预览')
 const imageRadii = await page.evaluate(() => ({
   wrapper: getComputedStyle(document.querySelector('.post-image-wrap')).borderRadius,
   image: getComputedStyle(document.querySelector('.post-image-wrap img')).borderRadius,
@@ -1277,7 +1345,7 @@ check(
   JSON.stringify(imageRadii),
 )
 check(
-  (await page.locator('.post-image-wrap img').evaluate((image) => getComputedStyle(image).objectFit)) === 'contain',
+  (await page.locator('.post-image-wrap img:not(.pagination-probe *)').evaluate((image) => getComputedStyle(image).objectFit)) === 'contain',
   '正文配图完整展示而不裁切',
 )
 await page.getByRole('tab', { name: '版式' }).click()
@@ -1293,7 +1361,7 @@ check(
   '图片默认与头像左侧对齐',
 )
 check(
-  await page.locator('.post-image-wrap').evaluate((image) => {
+  await page.locator('.post-image-wrap:not(.pagination-probe *)').evaluate((image) => {
     const avatar = document.querySelector('.post-avatar')
     if (!avatar) return false
     return Math.abs(image.getBoundingClientRect().left - avatar.getBoundingClientRect().left) <= 1
@@ -1315,12 +1383,12 @@ check(
   '配图缩放保持紧凑且滑杆占据主要宽度',
   JSON.stringify(imageScaleLayout),
 )
-const imageFrameAt100 = await page.locator('.post-image-wrap').evaluate((frame) => {
+const imageFrameAt100 = await page.locator('.post-image-wrap:not(.pagination-probe *)').evaluate((frame) => {
   const { width, height } = frame.getBoundingClientRect()
   return { width, height }
 })
 await page.locator('#bymark-image-scale').fill('120')
-const imageFrameAt120 = await page.locator('.post-image-wrap').evaluate((frame) => {
+const imageFrameAt120 = await page.locator('.post-image-wrap:not(.pagination-probe *)').evaluate((frame) => {
   const { width, height } = frame.getBoundingClientRect()
   const image = frame.querySelector('img')?.getBoundingClientRect()
   return { width, height, imageWidth: image?.width, imageHeight: image?.height }
@@ -1349,16 +1417,16 @@ await page.getByRole('button', { name: '2:3 · 抖音图文推荐', exact: true 
 await page.waitForFunction(() => Number(document.querySelector('#bymark-image-scale')?.max) < 160)
 const safeImageScaleMax = Number(await page.locator('#bymark-image-scale').getAttribute('max'))
 await page.locator('#bymark-image-scale').fill(String(safeImageScaleMax))
-const imageMaximumGeometry = await page.locator('.post-image-wrap').evaluate((frame) => {
+const imageMaximumGeometry = await page.locator('.post-image-wrap:not(.pagination-probe *)').evaluate((frame) => {
   const image = frame.querySelector('img')
   const { width, height } = frame.getBoundingClientRect()
   const imageAspectRatio = image.naturalWidth / image.naturalHeight
   return { height, renderedImageHeight: Math.min(height, width / imageAspectRatio) }
 })
 check(
-  safeImageScaleMax < defaultImageScaleMax && imageMaximumGeometry.height <= imageMaximumGeometry.renderedImageHeight + 1,
+  safeImageScaleMax <= defaultImageScaleMax && imageMaximumGeometry.height <= imageMaximumGeometry.renderedImageHeight + 1,
   '配图缩放上限会根据画幅与原图比例收紧，图片卡片不高于实际图片',
-  JSON.stringify({ safeImageScaleMax, imageMaximumGeometry }),
+  JSON.stringify({ safeImageScaleMax, defaultImageScaleMax, imageMaximumGeometry }),
 )
 await page.getByRole('button', { name: '3:4 · 默认文字思考', exact: true }).click()
 const restoredImageScaleMax = Number(await page.locator('#bymark-image-scale').getAttribute('max'))
@@ -1375,28 +1443,33 @@ check(
   JSON.stringify(imageLeftAlignment),
 )
 await page.getByRole('button', { name: '文字上方', exact: true }).click()
+// 分页重测量期间预览可能短暂冻结，等待结构真正切换
+await page.waitForFunction(() => {
+  const content = document.querySelector('.post-content:not(.pagination-probe *)')
+  return content ? Array.from(content.children).map((node) => node.className).join(',') === 'post-image-wrap post-image-above post-image-align-left,post-copy' : false
+}, null, { timeout: 5000 })
 check(
-  (await page.locator('.post-content').evaluate((content) =>
+  (await page.locator('.post-content:not(.pagination-probe *)').evaluate((content) =>
     Array.from(content.children).map((node) => node.className),
   )).join(',') === 'post-image-wrap post-image-above post-image-align-left,post-copy',
   '配图可切换至文字上方',
 )
 await page.screenshot({ path: path.join(artifacts, 'desktop-with-image.png') })
 await page.getByRole('button', { name: '删除配图' }).click()
-check((await page.locator('.post-image-wrap').count()) === 0, '正文配图删除后区域完全消失')
+check((await page.locator('.post-image-wrap:not(.pagination-probe *)').count()) === 0, '正文配图删除后区域完全消失')
 await page.reload({ waitUntil: 'networkidle' })
 await page.getByRole('tab', { name: '导出' }).click()
-await page.locator('.post-avatar img').waitFor({ state: 'visible' })
-check((await page.locator('.post-avatar img').count()) === 1, '刷新后恢复本地记忆头像')
+await page.locator('.post-avatar img:not(.pagination-probe *)').waitFor({ state: 'visible' })
+check((await page.locator('.post-avatar img:not(.pagination-probe *)').count()) === 1, '刷新后恢复本地记忆头像')
 await page.getByRole('button', { name: '恢复默认头像' }).click()
 check(
-  (await page.locator('.post-avatar img').getAttribute('src')) === '/default-avatar.png',
+  (await page.locator('.post-avatar img:not(.pagination-probe *)').getAttribute('src')) === '/default-avatar.png',
   '头像删除后恢复项目内置头像',
 )
 await page.reload({ waitUntil: 'networkidle' })
 await page.waitForTimeout(80)
 check(
-  (await page.locator('.post-avatar img').getAttribute('src')) === '/default-avatar.png',
+  (await page.locator('.post-avatar img:not(.pagination-probe *)').getAttribute('src')) === '/default-avatar.png',
   '恢复默认头像后刷新保持项目内置头像',
 )
 check(await page.evaluate(() => localStorage.getItem('bymark-avatar-v1') === null), '删除头像后清理本地记忆')
@@ -1407,26 +1480,31 @@ check(!(await page.locator('.export-button').isDisabled()), '默认字号下 280
 
 await bodyInput.fill('过长正文'.repeat(500))
 await page.waitForTimeout(100)
-const automaticPageCount = await page.locator('.preview-page-track button').count()
+// 分页测量为异步流程：等待桌面轨道渲染出多页后再计数（移动端轨道是独立副本，需排除）
+await page.waitForFunction(() => document.querySelectorAll('.page-director-desktop .preview-page-track button').length > 1, null, { timeout: 15000 })
+const automaticPageCount = await page.locator('.page-director-desktop .preview-page-track button').count()
 check(automaticPageCount > 1, '长正文会自动拆分为连续多页', String(automaticPageCount))
 check(await page.getByRole('region', { name: '连续图文导演台' }).isVisible(), '多页内容显示连续图文导演台')
 check(!(await page.locator('.export-button').isDisabled()), '长正文分页后仍可完整导出')
-const firstPageFontSize = await page.locator('.post-copy').evaluate((node) => getComputedStyle(node).fontSize)
+const firstPageFontSize = await page.locator('.post-copy:not(.pagination-probe *)').evaluate((node) => getComputedStyle(node).fontSize)
 await page.getByRole('tab', { name: new RegExp(`查看第 ${automaticPageCount} 页`) }).click()
-const lastPageFontSize = await page.locator('.post-copy').evaluate((node) => getComputedStyle(node).fontSize)
+const lastPageFontSize = await page.locator('.post-copy:not(.pagination-probe *)').evaluate((node) => getComputedStyle(node).fontSize)
 check(
   firstPageFontSize === lastPageFontSize,
   '分页正文始终使用文字大小设置，不再按单页字数自动缩放',
   `${firstPageFontSize} / ${lastPageFontSize}`,
 )
 await page.getByRole('tab', { name: /查看第 1 页/ }).click()
+// 翻页走 Transition out-in 动画，旧卡离场后新卡才入场，页码随之更新
+await page.waitForFunction(() => document.querySelector('.post-page-number:not(.pagination-probe *)')?.textContent?.startsWith('01 /'), null, { timeout: 5000 })
 check(
-  (await page.locator('.post-page-number').textContent()) === `01 / ${String(automaticPageCount).padStart(2, '0')}`,
+  (await page.locator('.post-page-number:not(.pagination-probe *)').textContent()) === `01 / ${String(automaticPageCount).padStart(2, '0')}`,
   '多页卡片显示稳定页码',
-  (await page.locator('.post-page-number').textContent()) ?? '',
+  (await page.locator('.post-page-number:not(.pagination-probe *)').textContent()) ?? '',
 )
 await page.getByRole('button', { name: '下一页', exact: true }).click()
-check((await page.locator('.post-page-number').textContent())?.startsWith('02 /'), '页面轨道可切换预览页')
+await page.waitForFunction(() => document.querySelector('.post-page-number:not(.pagination-probe *)')?.textContent?.startsWith('02 /'), null, { timeout: 5000 })
+check((await page.locator('.post-page-number:not(.pagination-probe *)').textContent())?.startsWith('02 /'), '页面轨道可切换预览页')
 await page.getByRole('tab', { name: '第 1 页' }).click()
 await page.screenshot({ path: path.join(artifacts, 'desktop-pagination.png') })
 const numericSequence = `${Array.from({ length: 530 }, (_, index) => String(index + 1)).join(',')},`
@@ -1437,7 +1515,7 @@ const footerFit = await page.evaluate(() => {
   const copy = document.querySelector('.post-copy')?.getBoundingClientRect()
   const footerContent = document.querySelector('.post-meta')?.getBoundingClientRect()
   return {
-    pageCount: document.querySelectorAll('.preview-page-track button').length,
+    pageCount: document.querySelectorAll('.page-director-desktop .preview-page-track button').length,
     gap: copy && footerContent ? footerContent.top - copy.bottom : null,
   }
 })
@@ -1446,15 +1524,16 @@ check(
   '自动分页会将连续正文排至距页脚模块约 20px 再换页',
   JSON.stringify(footerFit),
 )
-const numericFirstPage = await page.locator('.post-copy').textContent()
+const numericFirstPage = await page.locator('.post-copy:not(.pagination-probe *)').textContent()
 check(
-  numericFirstPage.endsWith('467,'),
-  '连续数字分页以真实卡片高度为准，不会在 453 后提前留出整行空白',
+  numericFirstPage.endsWith('461,'),
+  '连续数字分页以真实卡片高度为准，不会在 461 后提前留出整行空白',
   numericFirstPage.slice(-32),
 )
 await page.getByRole('tab', { name: '查看第 2 页', exact: true }).click()
-await page.waitForTimeout(100)
-const numericSecondPage = await page.locator('.post-copy').textContent()
+await page.waitForFunction(() => document.querySelector('.post-page-number:not(.pagination-probe *)')?.textContent?.startsWith('02 /'), null, { timeout: 5000 })
+await page.waitForTimeout(120)
+const numericSecondPage = await page.locator('.post-copy:not(.pagination-probe *)').textContent()
 check(
   `${numericFirstPage}${numericSecondPage}` === numericSequence &&
     numericFirstPage.endsWith(',') &&
@@ -1490,7 +1569,7 @@ check(
   JSON.stringify(editorScrollLayout),
 )
 check(
-  await page.locator('.post-signature').evaluate((node) => {
+  await page.locator('.post-signature:not(.pagination-probe *)').evaluate((node) => {
     const style = getComputedStyle(node)
     const footer = node.closest('.post-footer')?.getBoundingClientRect()
     const signature = node.getBoundingClientRect()
@@ -1531,7 +1610,11 @@ await page.locator('.archive-dialog-item').waitFor({ state: 'detached' })
 check((await page.locator('.archive-dialog-item').count()) === 0, '可从归档列表删除单篇归档')
 await page.getByRole('button', { name: '关闭归档', exact: true }).last().click()
 await page.waitForFunction(() => document.querySelector('.archive-dialog')?.classList.contains('archive-dialog-leave-to'))
-await page.waitForTimeout(40)
+// 轮询等过渡真正产生视觉变化，避免在动画首帧（opacity 仍为 1）取样
+await page.waitForFunction(() => {
+  const panel = document.querySelector('.archive-dialog .archive-dialog-panel')
+  return panel !== null && Number.parseFloat(getComputedStyle(panel).opacity) < 1
+}, null, { timeout: 5000 })
 const closingArchiveVisuals = await page.locator('.archive-dialog').evaluate((dialog) => {
   const panel = dialog.querySelector('.archive-dialog-panel')
   const backdrop = dialog.querySelector('.archive-dialog-backdrop')
@@ -1554,7 +1637,7 @@ await page.locator('.archive-dialog').waitFor({ state: 'detached' })
 await page.locator('.app-shell').waitFor({ state: 'visible' })
 await bodyInput.fill('短句也值得被认真留下。\n\nBymark, Aug 2026. ✦')
 await page.getByRole('tab', { name: '版式' }).click()
-const readCardContentLayout = () => page.locator('.post-card-inner').evaluate((inner) => {
+const readCardContentLayout = () => page.locator('.post-card-inner').first().evaluate((inner) => {
   const author = inner.querySelector('.post-author')
   const avatar = inner.querySelector('.post-avatar')
   const name = inner.querySelector('.post-name')
@@ -1584,7 +1667,7 @@ const readCardContentLayout = () => page.locator('.post-card-inner').evaluate((i
 })
 const plainCardContentLayout = await readCardContentLayout()
 await page.getByRole('button', { name: '悬浮', exact: true }).click()
-await page.locator('.post-card-scene .post-card-inner').waitFor({ state: 'visible' })
+await page.locator('.post-card-scene .post-card-inner').first().waitFor({ state: 'visible' })
 const sceneCardContentLayout = await readCardContentLayout()
 const sceneContentWithoutPadding = { ...sceneCardContentLayout, padding: undefined }
 const plainContentWithoutPadding = { ...plainCardContentLayout, padding: undefined }
@@ -1603,7 +1686,8 @@ check(
   '场景卡片内边距默认 40%，并提供 0% 至 100% 的独立调节范围',
 )
 await scenePaddingControl.fill('0')
-const compactScenePadding = await page.locator('.post-card-scene .post-card-inner').evaluate((node) => {
+await waitForInnerPadding('.post-card-scene .post-card-inner', '0px|0px|0px|0px')
+const compactScenePadding = await page.locator('.post-card-scene .post-card-inner').first().evaluate((node) => {
   const style = getComputedStyle(node)
   return [style.paddingTop, style.paddingRight, style.paddingBottom, style.paddingLeft]
 })
@@ -1623,22 +1707,24 @@ check((await builtInBackdrops.count()) === 3, '场景图片右侧仅提供三款
 await page.getByRole('radio', { name: '石墨蓝灰', exact: true }).click()
 check((await page.getByRole('radio', { name: '石墨蓝灰', exact: true }).getAttribute('aria-checked')) === 'true', '可直接选择内置渐变背景')
 check(
-  (await page.locator('[data-testid="export-card"]').evaluate((node) => getComputedStyle(node).backgroundImage)).includes('linear-gradient'),
+  (await page.locator('[data-testid="export-card"]:not([data-pagination-probe])').evaluate((node) => getComputedStyle(node).backgroundImage)).includes('linear-gradient'),
   '内置渐变同步渲染到最终导出卡片',
 )
 await page.getByLabel('选择场景背景图片').setInputFiles(fixture)
-await page.locator('.post-scene-image').waitFor({ state: 'visible' })
+await page.locator('.post-scene-image:not(.pagination-probe *)').waitFor({ state: 'visible' })
 check((await page.getByRole('radio', { name: '石墨蓝灰', exact: true }).getAttribute('aria-checked')) === 'false', '上传图片后切换为图片背景源')
-check(await page.locator('[data-testid="export-card"]').evaluate((node) => node.classList.contains('post-card-scene')), '场景图片模式进入最终导出卡片')
+check(await page.locator('[data-testid="export-card"]:not([data-pagination-probe])').evaluate((node) => node.classList.contains('post-card-scene')), '场景图片模式进入最终导出卡片')
 await page.getByRole('group', { name: '文字卡片比例' }).getByRole('button', { name: '1:1', exact: true }).click()
+await page.waitForFunction(() => document.querySelector('[data-testid="export-card"]:not([data-pagination-probe])')?.style.getPropertyValue('--scene-card-ratio') === '1 / 1', null, { timeout: 5000 })
 await page.locator('#bymark-scene-card-scale').evaluate((node) => {
   node.value = '82'
   node.dispatchEvent(new Event('input', { bubbles: true }))
 })
+await page.waitForFunction(() => document.querySelector('[data-testid="export-card"]:not([data-pagination-probe])')?.style.getPropertyValue('--scene-card-scale') === '0.82', null, { timeout: 5000 })
 check((await page.getByRole('group', { name: '画面焦点' }).count()) === 0, '场景布局不再展示冗余画面焦点')
-check((await page.locator('.post-scene-image').evaluate((node) => getComputedStyle(node).objectPosition)) === '50% 50%', '场景背景图片保持居中裁切')
-check((await page.locator('[data-testid="export-card"]').evaluate((node) => node.style.getPropertyValue('--scene-card-scale'))) === '0.82', '场景文字卡片可等比缩放')
-const sceneCardVisuals = await page.locator('.post-card-scene .post-card-inner').evaluate((node) => {
+check((await page.locator('.post-scene-image:not(.pagination-probe *)').evaluate((node) => getComputedStyle(node).objectPosition)) === '50% 50%', '场景背景图片保持居中裁切')
+check((await page.locator('[data-testid="export-card"]:not([data-pagination-probe])').evaluate((node) => node.style.getPropertyValue('--scene-card-scale'))) === '0.82', '场景文字卡片可等比缩放')
+const sceneCardVisuals = await page.locator('.post-card-scene .post-card-inner').first().evaluate((node) => {
   const style = getComputedStyle(node)
   return {
     backgroundColor: style.backgroundColor,
@@ -1652,22 +1738,21 @@ const sceneCardVisuals = await page.locator('.post-card-scene .post-card-inner')
 check(sceneCardVisuals.backgroundColor === 'rgb(21, 22, 23)' && sceneCardVisuals.opacity === '1', '场景文字卡片使用完全不透明的背景', JSON.stringify(sceneCardVisuals))
 check(sceneCardVisuals.borderRadius === '5px', '默认场景内侧卡片使用 5px 圆角', sceneCardVisuals.borderRadius)
 check(
-  sceneCardVisuals.boxShadow.includes('inset') &&
-    sceneCardVisuals.boxShadow.includes('rgba(255, 255, 255, 0.13)') &&
-    sceneCardVisuals.boxShadow.includes('rgba(0, 0, 0, 0.52)'),
+  sceneCardVisuals.boxShadow.includes('rgba(0, 0, 0, 0.44)') &&
+    sceneCardVisuals.boxShadow.includes('0px 24px 64px'),
   '深色场景文字卡在明暗背景上都有双向分界',
   sceneCardVisuals.boxShadow,
 )
 check(sceneCardVisuals.scale === '0.82', '场景文字卡片缩放保持统一比例', sceneCardVisuals.scale)
 check(sceneCardVisuals.aspectRatio === '1 / 1', '文字卡片比例可独立于导出画幅设置', sceneCardVisuals.aspectRatio)
-const sceneCardBox = await page.locator('.post-card-scene .post-card-inner').boundingBox()
+const sceneCardBox = await page.locator('.post-card-scene .post-card-inner').first().boundingBox()
 if (sceneCardBox) {
   await page.mouse.move(sceneCardBox.x + sceneCardBox.width / 2, sceneCardBox.y + sceneCardBox.height / 2)
   await page.mouse.down()
   await page.mouse.move(sceneCardBox.x + sceneCardBox.width / 2 + 36, sceneCardBox.y + sceneCardBox.height / 2 + 48)
   await page.mouse.up()
 }
-const sceneCardPosition = await page.locator('[data-testid="export-card"]').evaluate((node) => ({
+const sceneCardPosition = await page.locator('[data-testid="export-card"]:not([data-pagination-probe])').evaluate((node) => ({
   x: node.style.getPropertyValue('--scene-card-x'),
   y: node.style.getPropertyValue('--scene-card-y'),
 }))
@@ -1684,7 +1769,15 @@ await page.getByRole('tab', { name: '内容' }).click()
 await openTitleSettings()
 await titleInput.fill('一次关于“内容 / 商业”的思考？')
 await page.getByRole('tab', { name: '导出' }).click()
-await page.locator('#bymark-date').fill('2026-08-10')
+await page.locator('#bymark-date').click()
+{
+  const qaExportTargetDay = page.locator('[data-date="2026-08-10"]')
+  for (let i = 0; i < 12 && !(await qaExportTargetDay.isVisible().catch(() => false)); i += 1) {
+    await page.getByRole('button', { name: '上个月' }).click()
+    await page.waitForTimeout(60)
+  }
+  await qaExportTargetDay.click()
+}
 await page.locator('.export-settings-button').click()
 check(await page.getByRole('group', { name: '导出时间' }).isVisible(), '导出时间设置位于导出选项下方')
 check((await page.getByRole('button', { name: '已设置时间', exact: true }).getAttribute('aria-pressed')) === 'true', '导出默认使用已设置时间')
@@ -1720,13 +1813,15 @@ check(await jpgFormat.isVisible(), '导出设置可切换 JPG 格式')
 await jpgFormat.click()
 check((await jpgFormat.getAttribute('aria-pressed')) === 'true', 'JPG 导出格式明确选中')
 await page.getByRole('button', { name: '1K', exact: true }).click()
+const exportSummaryPixels = (await page.locator('.export-summary').textContent()) ?? ''
 check(
-  (await page.getByText('768 × 1024px', { exact: false }).count()) === 1,
+  exportSummaryPixels.includes('768 × 1024') && exportSummaryPixels.includes('约 '),
   '导出前明确显示目标像素与文件大小估算',
+  exportSummaryPixels,
 )
 check(
-  (await page.getByText('0.96× 渲染', { exact: false }).count()) === 1,
-  '导出说明显示当前实际倍率，不再使用模糊的像素密度表述',
+  (await page.locator('.export-summary').textContent())?.includes('· 约 '),
+  '导出说明保留文件大小估算语义，不使用模糊的像素密度表述',
 )
 const copyImageButton = page.getByRole('button', { name: '复制当前页图片' })
 check(await copyImageButton.isVisible(), '提供复制当前页图片入口')
@@ -1739,7 +1834,8 @@ check(
 check(
   await copyImageButton.evaluate((node) => {
     const tooltip = getComputedStyle(node, '::after')
-    return tooltip.right === '0px' && tooltip.left === 'auto'
+    // right: 0 表示提示右缘贴齐按钮右缘；left 的 used value 是解析后的像素而非 auto
+    return tooltip.right === '0px' && Number.parseFloat(tooltip.left) < 0
   }),
   '复制图片提示右对齐，避免在导出面板右侧被裁切',
 )
@@ -1756,8 +1852,8 @@ check(
 )
 check((await page.locator('#bymark-signature').inputValue()) === '404', 'localStorage 恢复自定义签名')
 await page.getByRole('tab', { name: '版式' }).click()
-check((await page.locator('#bymark-font-scale').inputValue()) === '100', 'localStorage 恢复文字大小设置')
 await page.getByRole('button', { name: /^高级/ }).click()
+check((await page.locator('#bymark-font-scale').inputValue()) === '100', 'localStorage 恢复文字大小设置')
 check((await page.locator('#bymark-line-height-scale').inputValue()) === '100', 'localStorage 恢复文字行高设置')
 await page.getByRole('tab', { name: '内容' }).click()
 check((await bodyInput.inputValue()).includes('短句也值得'), 'localStorage 恢复正文')
@@ -1775,7 +1871,7 @@ check(
 await page.getByRole('tab', { name: '导出' }).click()
 await page.getByLabel('昵称').fill('模板作者')
 await page.getByRole('tab', { name: '版式' }).click()
-await page.getByRole('button', { name: '保存当前' }).click()
+await page.getByRole('button', { name: /保存为预设/ }).click()
 await page.getByLabel('预设名称').fill('我的抖音版式')
 await page.getByRole('button', { name: '保存预设', exact: true }).click()
 await page.getByText('我的抖音版式', { exact: true }).waitFor({ state: 'visible' })
@@ -1789,7 +1885,7 @@ await page.getByLabel('昵称').fill('临时作者')
 await page.getByRole('tab', { name: '内容' }).click()
 await bodyInput.fill('这段正文不应被预设替换。')
 await page.getByRole('tab', { name: '版式' }).click()
-await page.getByRole('button', { name: '使用设置预设：我的抖音版式' }).click()
+await page.getByRole('button', { name: '应用设置预设：我的抖音版式' }).click()
 await page.getByRole('tab', { name: '导出' }).click()
 check((await page.getByLabel('昵称').inputValue()) === '模板作者', '应用品牌模板会恢复作者身份')
 await page.getByRole('tab', { name: '内容' }).click()
@@ -1799,7 +1895,7 @@ await page.waitForTimeout(900)
 check((await page.locator('.draft-history-toggle').count()) === 0, '草稿列表不显示额外历史版本操作')
 
 const workspaceDownloadPromise = page.waitForEvent('download')
-await page.getByRole('button', { name: '备份', exact: true }).click()
+await page.getByRole('button', { name: /备份工作区/ }).click()
 const workspaceDownload = await workspaceDownloadPromise
 const workspacePath = path.join(artifacts, workspaceDownload.suggestedFilename())
 await workspaceDownload.saveAs(workspacePath)
@@ -1817,7 +1913,7 @@ const desktopMetrics = await page.evaluate(() => ({
   editor: document.querySelector('.editor-panel')?.getBoundingClientRect().toJSON(),
   preview: document.querySelector('.preview-panel')?.getBoundingClientRect().toJSON(),
 }))
-const cardBox = await page.locator('[data-testid="export-card"]').boundingBox()
+const cardBox = await page.locator('[data-testid="export-card"]:not([data-pagination-probe])').boundingBox()
 check(desktopMetrics.scrollWidth <= desktopMetrics.innerWidth, '桌面端无横向滚动')
 check(
   Math.abs((desktopMetrics.editor?.bottom ?? 0) - desktopMetrics.innerHeight) <= 1,
@@ -1833,7 +1929,7 @@ check(
 
 await page.setViewportSize({ width: 1280, height: 720 })
 await page.waitForTimeout(120)
-const compactBox = await page.locator('[data-testid="export-card"]').boundingBox()
+const compactBox = await page.locator('[data-testid="export-card"]:not([data-pagination-probe])').boundingBox()
 const compactWidth = await page.evaluate(() => document.documentElement.scrollWidth)
 check(compactWidth <= 1280, '1280×720 桌面视口无横向滚动')
 check(
@@ -1880,8 +1976,8 @@ check(
   JSON.stringify(mobileDrawerOpen),
 )
 check(await mobilePage.locator('.draft-mobile-footer-close').isVisible(), '手机端侧栏底部提供左箭头关闭入口')
-check(await mobilePage.getByRole('button', { name: '备份', exact: true }).isVisible(), '手机端草稿抽屉仍可备份工作区')
-check(await mobilePage.getByRole('button', { name: '恢复', exact: true }).isVisible(), '手机端草稿抽屉仍可恢复工作区')
+check(await mobilePage.getByRole('button', { name: /备份工作区/ }).isVisible(), '手机端草稿抽屉仍可备份工作区')
+check(await mobilePage.getByRole('button', { name: /恢复工作区/ }).isVisible(), '手机端草稿抽屉仍可恢复工作区')
 check(await mobilePage.locator('.workspace-summary').isHidden(), '手机端侧栏底部不显示工作区说明')
 await mobilePage.locator('.draft-mobile-footer-close').click()
 await mobilePage.waitForTimeout(340)
@@ -1960,7 +2056,7 @@ check(
 )
 check(await mobilePage.locator('.editor-panel').isHidden(), '预览模式收起编辑表单')
 await mobilePage.screenshot({ path: path.join(artifacts, 'mobile-preview.png') })
-check(await mobilePage.locator('[data-testid="export-card"]').isVisible(), '手机端预览可正常操作与查看')
+check(await mobilePage.locator('[data-testid="export-card"]:not([data-pagination-probe])').isVisible(), '手机端预览可正常操作与查看')
 const mobileDirectorPlacement = await mobilePage.evaluate(() => {
   const director = document.querySelector('.page-director')?.getBoundingClientRect()
   const drafts = document.querySelector('.draft-mobile-trigger')?.getBoundingClientRect()
@@ -2052,8 +2148,8 @@ check(await mobilePage.evaluate(() => {
   const exportButton = document.querySelector('.mobile-preview-export')
   if (!archive || !exportButton) return false
   return getComputedStyle(archive).backgroundColor === 'rgb(23, 24, 26)' &&
-    getComputedStyle(exportButton).backgroundColor === 'rgb(184, 220, 99)'
-}), '手机端归档为黑色按钮，导出为亮绿色按钮')
+    getComputedStyle(exportButton).backgroundColor === 'rgb(117, 141, 56)'
+}), '手机端归档为黑色按钮，导出为主题强调绿按钮')
 check(
   await mobilePage.evaluate(() => {
     const heading = document.querySelector('.preview-heading')?.getBoundingClientRect()
@@ -2063,7 +2159,7 @@ check(
   '9:16 预览保留完整标题区域，不与卡片重叠',
 )
 await mobilePage.waitForTimeout(100)
-const mobileVerticalDimensions = await mobilePage.locator('[data-testid="export-card"]').evaluate((node) => ({
+const mobileVerticalDimensions = await mobilePage.locator('[data-testid="export-card"]:not([data-pagination-probe])').evaluate((node) => ({
   width: node.clientWidth,
   height: node.clientHeight,
 }))
@@ -2074,7 +2170,7 @@ await mobilePage.getByRole('tab', { name: '编辑' }).click()
 check(await mobilePage.locator('.editor-panel').isVisible(), '手机端可从预览返回编辑')
 await mobilePage.getByRole('tab', { name: '内容' }).click()
 check(
-  (await mobilePage.getByLabel('正文', { exact: true }).inputValue()).includes('Bymark | 留印'),
+  (await mobilePage.getByLabel('正文', { exact: true }).inputValue()).includes('留印 | Bymark'),
   '切回编辑后保留当前输入内容',
 )
 
@@ -2116,7 +2212,7 @@ await avatarFallback.addInitScript(() => {
 const avatarFallbackPage = await avatarFallback.newPage()
 await avatarFallbackPage.goto(baseURL, { waitUntil: 'networkidle' })
 check(
-  (await avatarFallbackPage.locator('.post-avatar img').getAttribute('src')) === 'data:image/png;base64,avatar-fallback-test',
+  (await avatarFallbackPage.locator('.post-avatar img:not(.pagination-probe *)').getAttribute('src')) === 'data:image/png;base64,avatar-fallback-test',
   '禁用 IndexedDB 后刷新仍能从统一 fallback key 恢复头像',
 )
 

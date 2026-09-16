@@ -31,6 +31,29 @@ export function markdownToPlainText(source: string) {
 }
 
 /** A deliberately small, safe Markdown dialect for deterministic card exports. */
+
+// UAX#14 treats "134,135" (number comma number) as one unbreakable run, so a
+// long comma-separated list would trigger overflow-wrap's emergency break in
+// the middle of a digit. Offering a break opportunity after each comma keeps
+// the wrap on the separator instead.
+const NUMBER_COMMA_BREAK = /(?<=\d),(?=\d)/gu;
+
+function withNumberCommaBreaks(text: string): VNodeChild[] {
+  if (!text.match(NUMBER_COMMA_BREAK)) return [text];
+  NUMBER_COMMA_BREAK.lastIndex = 0;
+  const parts: VNodeChild[] = [];
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = NUMBER_COMMA_BREAK.exec(text)) !== null) {
+    const end = match.index + match[0].length;
+    parts.push(text.slice(cursor, end));
+    parts.push(h("wbr", { key: `wbr-${match.index}` }));
+    cursor = end;
+  }
+  if (cursor < text.length) parts.push(text.slice(cursor));
+  return parts;
+}
+
 function renderInlineMarkdown(value: string): VNodeChild[] {
   const nodes: VNodeChild[] = [];
   const pattern = /(\*\*|__)([\s\S]+?)\1|(\*|_)([\s\S]+?)\3|`([^`]+)`/g;
@@ -38,7 +61,7 @@ function renderInlineMarkdown(value: string): VNodeChild[] {
   let match: RegExpExecArray | null;
 
   while ((match = pattern.exec(value)) !== null) {
-    if (match.index > cursor) nodes.push(value.slice(cursor, match.index));
+    if (match.index > cursor) nodes.push(...withNumberCommaBreaks(value.slice(cursor, match.index)));
     if (match[1])
       nodes.push(
         h(
@@ -54,7 +77,7 @@ function renderInlineMarkdown(value: string): VNodeChild[] {
     else nodes.push(h("code", { key: `code-${match.index}` }, match[5]));
     cursor = pattern.lastIndex;
   }
-  if (cursor < value.length) nodes.push(value.slice(cursor));
+  if (cursor < value.length) nodes.push(...withNumberCommaBreaks(value.slice(cursor)));
   return nodes;
 }
 

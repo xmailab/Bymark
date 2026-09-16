@@ -1,6 +1,7 @@
 node_modules
 dist
 test-results
+tests/.qa-artifacts
 .audit
 .codex
 design-qa.md

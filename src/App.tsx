@@ -697,6 +697,14 @@ export default defineComponent(() => {
     historyResetToken.value += 1;
     await saveAvatar(DEFAULT_AVATAR);
     window.setTimeout(() => (applyingSnapshot = false), 0);
+    // 重置后的内容立即落为新草稿，让右侧草稿列表直接出现，
+    // 不需要用户再点一次草稿才能看到。
+    try {
+      await saveActiveDraftSnapshot();
+    } catch {
+      notice.value = { tone: "error", message: "重置内容未能保存为草稿，请稍后重试。" };
+      return;
+    }
     notice.value = { tone: "success", message: "当前作品已恢复为项目初始化配置。" };
   });
   const waitForRenderedPage = async () => {
@@ -714,7 +722,11 @@ export default defineComponent(() => {
   const lastMeasuredBreak = async (source: string, start: number, pageIndex: number, version: number) => {
     const breakpoints: number[] = [];
     for (let index = start + 1; index < source.length; index += 1) {
-      if (/[。！？；.!?;，,、：:\n\s]/u.test(source[index - 1])) breakpoints.push(index);
+      const previous = source[index - 1] ?? "";
+      // CJK 文本允许在任意字符间断行，否则无标点长文会退化成逐字测页。
+      if (/[。！？；.!?;，,、：:\n\s]/u.test(previous) || /\p{Script=Han}|\p{Script=Hiragana}|\p{Script=Katakana}|\p{Script=Hangul}/u.test(previous)) {
+        breakpoints.push(index);
+      }
     }
     if (breakpoints.at(-1) !== source.length) breakpoints.push(source.length);
 
