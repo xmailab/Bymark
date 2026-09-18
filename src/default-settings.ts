@@ -96,8 +96,8 @@ export const DEFAULT_EXPORT_SETTINGS = {
 
 export const DEFAULT_BYMARK_SETTINGS: Readonly<BymarkState> = {
   title: 'Bymark｜留印',
-  name: '失效样本',
-  userId: '@sample404',
+  name: '小满Neo',
+  userId: '@uchatgo',
   text: `留印 | Bymark
 为短文字创作者设计的个人化分享图生成器。
 
@@ -118,7 +118,7 @@ export const DEFAULT_BYMARK_SETTINGS: Readonly<BymarkState> = {
   showDate: true,
   showLocation: true,
   showSignature: true,
-  signature: '@失效样本',
+  signature: '@小满Neo',
   socialReplies: '2',
   socialReposts: '',
   socialLikes: '5',
